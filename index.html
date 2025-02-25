@@ -1,1 +1,273 @@
 
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Task Summarizer</title>
+
+    <!-- Bootstrap CSS -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+    <!-- SheetJS (for reading Excel files) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <style>
+      body {
+        background-color: #f8f9fa;
+      }
+      .container {
+        max-width: 900px;
+        margin: 50px auto;
+      }
+      .card-header {
+        background-color: #007bff;
+        color: white;
+        font-weight: bold;
+      }
+      .list-group-item {
+        font-size: 14px;
+      }
+      .summary-box {
+        background-color: #f1f1f1;
+        padding: 15px;
+        border-left: 5px solid #007bff;
+        margin-bottom: 15px;
+        font-size: 14px;
+      }
+      .highlight {
+        font-weight: bold;
+        color: #d9534f;
+      }
+      .summary-box ol {
+        list-style-type: none;
+        padding-left: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2 class="text-center text-primary">Excel Task Summarizer</h2>
+
+      <div class="mb-3">
+        <input type="file" id="excelFile" class="form-control" />
+      </div>
+
+      <button class="btn btn-success" id="processFile">Process File</button>
+
+      <h3 class="mt-4">Summary Report</h3>
+      <div id="summaryContainer"></div>
+    </div>
+
+    <script>
+      const apiURL = "https://api.groq.com/openai/v1/chat/completions";
+      const apiKey = "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";
+      const model = "mixtral-8x7b-32768";
+      const prompt ="Summarize the given task descriptions concisely, highlighting key activities.";
+
+      $(document).ready(function () {
+        $("#processFile").click(function () {
+          let file = $("#excelFile")[0].files[0];
+          let button = $(this);
+
+          if (!file) {
+            alert("Please upload an Excel file.");
+            return;
+          }
+
+          
+          button.prop("disabled", true).text("Processing...");
+
+          let reader = new FileReader();
+          reader.onload = function (e) {
+            let data = new Uint8Array(e.target.result);
+            let workbook = XLSX.read(data, { type: "array" });
+
+            let sheetName = workbook.SheetNames[0];
+            let sheet = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+              header: 1,
+            });
+
+            let processedData = processExcelData(sheet);
+            summarizeTasks(processedData);
+
+            
+            button.prop("disabled", false).text("Process File");
+          };
+
+          reader.readAsArrayBuffer(file);
+        });
+      });
+
+      function processExcelData(sheet) {
+        let records = [];
+        let headers = sheet[0];
+
+        for (let i = 1; i < sheet.length; i++) {
+          let row = sheet[i];
+
+          if (row.length < 18) continue;
+
+          let app = row[5] || "Others";
+          let classification = row[7] || "Others";
+          let subClassification = row[8] || "Others";
+          let task = row[9] || "No task description";
+          let hours = parseFloat(row[17]) || 0;
+
+          records.push({
+            application: app,
+            classification: classification,
+            subClassification: subClassification,
+            task: task,
+            hours: hours.toFixed(2),
+          });
+        }
+
+        return records;
+      }
+
+      function summarizeTasks(data) {
+        let groupedTasks = {};
+        data.forEach((item) => {
+          if (!groupedTasks[item.application]) {
+            groupedTasks[item.application] = [];
+          }
+          groupedTasks[item.application].push(item.task);
+        });
+
+        let summaries = {};
+        let pendingRequests = Object.keys(groupedTasks).length;
+
+        if (pendingRequests === 0) {
+          alert("No tasks found to summarize.");
+          return;
+        }
+
+        Object.keys(groupedTasks).forEach((app) => {
+          callGroqAPI(groupedTasks[app], function (summary) {
+            summaries[app] = summary;
+            pendingRequests--;
+
+            if (pendingRequests === 0) {
+              displaySummary(data, summaries);
+            }
+          });
+        });
+      }
+
+      function callGroqAPI(tasks, callback) {
+        let taskText =
+          "Tasks:\n" +
+          tasks.map((task, index) => `${index + 1}. ${task}`).join("\n");
+
+        $.ajax({
+          url: apiURL,
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + apiKey,
+            "Content-Type": "application/json",
+          },
+          data: JSON.stringify({
+            model: model,
+            messages: [
+              { role: "system", content: prompt },
+              { role: "user", content: taskText },
+            ],
+          }),
+          success: function (response) {
+            let summary =
+              response.choices?.[0]?.message?.content || "Summary unavailable";
+            callback(summary);
+          },
+          error: function () {
+            callback("Error fetching summary");
+          },
+        });
+      }
+
+      function displaySummary(data, summaries) {
+        let appData = {};
+        let totalHours = 0;
+
+        
+        data.forEach((item) => {
+          if (!appData[item.application]) {
+            appData[item.application] = { totalHours: 0, classifications: {} };
+          }
+
+          if (!appData[item.application].classifications[item.classification]) {
+            appData[item.application].classifications[item.classification] = {
+              totalHours: 0,
+              subClassifications: {},
+            };
+          }
+
+          if (
+            !appData[item.application].classifications[item.classification]
+              .subClassifications[item.subClassification]
+          ) {
+            appData[item.application].classifications[
+              item.classification
+            ].subClassifications[item.subClassification] = { totalHours: 0 };
+          }
+
+          let app = appData[item.application];
+          let classData = app.classifications[item.classification];
+          let subClass = classData.subClassifications[item.subClassification];
+
+          subClass.totalHours += parseFloat(item.hours);
+          classData.totalHours += parseFloat(item.hours);
+          app.totalHours += parseFloat(item.hours);
+          totalHours += parseFloat(item.hours);
+        });
+
+        let summaryHTML = `<h4 class="text-success">Total Hours: ${totalHours.toFixed(
+          2
+        )}</h4>`;
+
+        Object.keys(appData).forEach((appName) => {
+          let app = appData[appName];
+          let summary = summaries[appName] || "No summary available";
+
+          
+          let summaryList = summary
+            .split("\n")
+            .map((item) => item.trim().replace(/^\d+\.\s*|\*/g, "• ")) 
+            .map((item) => `<li>${item}</li>`)
+            .join("");
+
+          summaryHTML += `
+        <div class="card mt-3">
+            <div class="card-header">${appName} (Total: ${app.totalHours.toFixed(
+            2
+          )} hrs)</div>
+            <div class="card-body">
+                <div class="summary-box">
+                    <ol>${summaryList}</ol>
+                </div>
+                <ul class="list-group">`;
+
+          Object.keys(app.classifications).forEach((className) => {
+            let classData = app.classifications[className];
+            summaryHTML += `<li class="list-group-item"><span class="highlight">${className}</span> - ${classData.totalHours.toFixed(
+              2
+            )} hrs</li>`;
+          });
+
+          summaryHTML += `</ul></div></div>`;
+        });
+
+        $("#summaryContainer").html(summaryHTML);
+      }
+    </script>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
